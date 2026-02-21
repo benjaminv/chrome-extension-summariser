@@ -61,7 +61,7 @@ document.querySelectorAll('.tab').forEach(tab => {
 // Initialize
 async function init() {
   const saved = await chrome.storage.local.get([
-    'provider', 'theme', 'translationEnabled', 'currentSummary', 'currentTranslation'
+    'provider', 'theme', 'translationEnabled', 'currentSummary', 'currentTranslation', 'summaryStatus', 'summaryError'
   ]);
   
   // Theme
@@ -75,8 +75,15 @@ async function init() {
     translationToggle.classList.add('active');
   }
   
-  // Current summary
-  if (saved.currentSummary) {
+  // Restore current state
+  if (saved.summaryStatus && saved.summaryStatus !== 'done' && saved.summaryStatus !== 'error') {
+    // Still processing in background
+    summarizeBtn.disabled = true;
+    summarizeBtn.textContent = 'Summarising...';
+    updateStatusDisplay(saved.summaryStatus, saved.currentSummary, saved.currentTranslation);
+  } else if (saved.summaryStatus === 'error') {
+    resultDiv.innerHTML = '<span class="error">' + (saved.summaryError || 'Unknown error') + '</span>';
+  } else if (saved.currentSummary) {
     currentSummary = saved.currentSummary;
     currentTranslation = saved.currentTranslation || '';
     displaySummary(currentSummary, currentTranslation);
@@ -293,7 +300,7 @@ translationToggle.addEventListener('click', async () => {
   await chrome.storage.local.set({ translationEnabled: translationToggle.classList.contains('active') });
 });
 
-// Summarize
+// Summarise - delegate to background service worker
 summarizeBtn.addEventListener('click', async () => {
   const provider = currentProvider;
   const model = modelSelect.value;
@@ -313,107 +320,78 @@ summarizeBtn.addEventListener('click', async () => {
     return;
   }
   
+  // Get active tab
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    resultDiv.innerHTML = '<span class="error">No active tab</span>';
+    return;
+  }
+  
   summarizeBtn.disabled = true;
   summarizeBtn.textContent = 'Summarising...';
   resultDiv.innerHTML = '<span class="loading">Extracting page content...</span>';
   
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error('No active tab');
-    
-    const data = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => (document.body.innerText || '').replace(/\s+/g, ' ').trim().substring(0, 5000)
-    });
-    
-    const pageText = data[0]?.result;
-    if (!pageText || pageText.length < 50) throw new Error('No content');
-    
-    resultDiv.innerHTML = '<span class="loading">Analysing content...</span>';
-    
-    // Call API
-    const summarizerSystem = 'You are a professional summariser. Output ONLY the final result. Do NOT show any thinking, reasoning, or explanation. Do NOT include any meta-commentary. Just give the answer directly.';
-    
-    let url, headers, body;
-    if (provider === 'gemini') {
-      url = `${baseUrl}/${model}:generateContent`;
-      headers = { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey };
-      body = { 
-        contents: [{ parts: [{ text: prompt + '\n\n' + pageText }] }], 
-        generationConfig: { maxOutputTokens: 800, temperature: 0.1 },
-        systemInstruction: { parts: [{ text: summarizerSystem }] }
-      };
-    } else {
-      url = `${baseUrl}${config.endpoint}`;
-      headers = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-      body = { 
-        model, 
-        messages: [
-          { role: 'system', content: summarizerSystem },
-          { role: 'user', content: prompt + '\n\n' + pageText }
-        ], 
-        max_tokens: 600,
-        temperature: 0.1
-      };
-    }
-    
-    resultDiv.innerHTML = '<span class="loading">Generating summary...</span>';
-    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-    if (!resp.ok) throw new Error('API error: ' + resp.status);
-    
-    const json = await resp.json();
-    console.log('Raw API response:', json);
-    let summary = provider === 'gemini' 
-      ? json.candidates?.[0]?.content?.parts?.[0]?.text 
-      : json.choices?.[0]?.message?.content;
-    
-    if (!summary) throw new Error('No summary');
-    
-    // Strip <think>...</think> blocks from reasoning models
-    summary = summary.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-    currentSummary = summary;
-    
-    // Show summary immediately
-    displaySummary(summary, '');
-    await chrome.storage.local.set({ currentSummary: summary, currentTranslation: '' });
-    
-    // Then translate if enabled and not already Chinese
-    console.log('Translation enabled:', translate, '| Has Chinese:', /[\u4e00-\u9fa5]/.test(summary.substring(0, 200)));
-    if (translate && !/[\u4e00-\u9fa5]/.test(summary.substring(0, 200))) {
-      // Show loading state in translation column
-      displaySummaryWithTranslationLoading(summary);
-      
-      try {
-        const translation = await translateText(summary, provider, model, apiKey, baseUrl);
-        console.log('Translation result:', translation);
-        currentTranslation = translation;
-        displaySummary(summary, translation);
-        await chrome.storage.local.set({ currentSummary: summary, currentTranslation: translation });
-      } catch (e) {
-        console.error('Translation failed:', e);
-        // Show error in translation column instead of silently hiding
-        resultDiv.innerHTML = `
-          <div class="result-cols">
-            <div class="result-col">
-              <h4>${ICON_FILE_TEXT} Summary</h4>
-              <div>${formatText(summary)}</div>
-            </div>
-            <div class="result-col cn">
-              <h4>${ICON_LANGUAGES} 中文</h4>
-              <div><span class="error">Translation failed: ${e.message}</span></div>
-            </div>
-          </div>
-        `;
-      }
-    }
-    
-  } catch (e) {
-    resultDiv.innerHTML = '<span class="error">' + e.message + '</span>';
-  } finally {
-    summarizeBtn.disabled = false;
-    summarizeBtn.textContent = 'Summarise Page';
+  // Clear previous state and send to background
+  await chrome.storage.local.set({
+    currentSummary: '',
+    currentTranslation: '',
+    summaryStatus: 'extracting',
+    summaryError: ''
+  });
+  
+  chrome.runtime.sendMessage({
+    action: 'summarise',
+    provider, model, apiKey, baseUrl, prompt, translate,
+    tabId: tab.id
+  });
+});
+
+// Listen for storage changes to update UI reactively
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes.summaryStatus) {
+    const status = changes.summaryStatus.newValue;
+    const summary = changes.currentSummary?.newValue || currentSummary;
+    const translation = changes.currentTranslation?.newValue || currentTranslation;
+    updateStatusDisplay(status, summary, translation);
+  }
+  
+  if (changes.currentSummary && changes.currentSummary.newValue) {
+    currentSummary = changes.currentSummary.newValue;
+  }
+  if (changes.currentTranslation !== undefined && changes.currentTranslation.newValue !== undefined) {
+    currentTranslation = changes.currentTranslation.newValue;
   }
 });
+
+// Update display based on background processing status
+function updateStatusDisplay(status, summary, translation) {
+  switch (status) {
+    case 'extracting':
+      resultDiv.innerHTML = '<span class="loading">Extracting page content...</span>';
+      break;
+    case 'analysing':
+      resultDiv.innerHTML = '<span class="loading">Analysing content...</span>';
+      break;
+    case 'summarising':
+      resultDiv.innerHTML = '<span class="loading">Generating summary...</span>';
+      break;
+    case 'translating':
+      if (summary) displaySummaryWithTranslationLoading(summary);
+      break;
+    case 'done':
+      summarizeBtn.disabled = false;
+      summarizeBtn.textContent = 'Summarise Page';
+      if (summary) displaySummary(summary, translation || '');
+      break;
+    case 'error':
+      summarizeBtn.disabled = false;
+      summarizeBtn.textContent = 'Summarise Page';
+      chrome.storage.local.get(['summaryError'], (data) => {
+        resultDiv.innerHTML = '<span class="error">' + (data.summaryError || 'Unknown error') + '</span>';
+      });
+      break;
+  }
+}
 
 // Lucide SVG icons (inline to avoid CDN dependency)
 const ICON_FILE_TEXT = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13H8"/><path d="M16 17H8"/><path d="M16 13h-2"/></svg>';
@@ -464,48 +442,6 @@ function formatText(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
   return escaped.replace(/\n/g, '<br>');
-}
-
-
-
-async function translateText(text, provider, model, apiKey, baseUrl) {
-  const config = PROVIDER_CONFIG[provider];
-  const translateSystem = 'You are a pure translator. Translate the following text to Chinese. Output ONLY the translated text. Do NOT re-analyse, re-summarise, or add any extra content. Do NOT reference any original article or source material. Just translate the exact text given to you word by word, preserving the original format and structure.';
-  
-  let url, headers, body;
-  if (provider === 'gemini') {
-    url = `${baseUrl}/${model}:generateContent`;
-    headers = { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey };
-    body = {
-      contents: [{ parts: [{ text: 'Translate the following text to Chinese. Do NOT add anything extra, just translate:\n\n' + text }] }],
-      generationConfig: { maxOutputTokens: 1000, temperature: 0.1 },
-      systemInstruction: { parts: [{ text: translateSystem }] }
-    };
-  } else {
-    url = `${baseUrl}${config.endpoint}`;
-    headers = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-    body = {
-      model,
-      messages: [
-        { role: 'system', content: translateSystem },
-        { role: 'user', content: 'Translate the following text to Chinese. Do NOT add anything extra, just translate:\n\n' + text }
-      ],
-      max_tokens: 1000,
-      temperature: 0.1
-    };
-  }
-  
-  const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!resp.ok) throw new Error('Translation API error: ' + resp.status);
-  
-  const json = await resp.json();
-  let result = provider === 'gemini' 
-    ? json.candidates?.[0]?.content?.parts?.[0]?.text 
-    : json.choices?.[0]?.message?.content;
-  
-  // Strip <think> tags from translation response too
-  if (result) result = result.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-  return result || '';
 }
 
 
