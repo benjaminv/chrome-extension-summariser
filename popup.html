@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    :root { --bg: #fff; --text: #333; --border: #ddd; --primary: #0066cc; --bg2: #f5f5f5; --success: #28a745; --error: #dc3545; --label: #666; }
+    .dark { --bg: #1a1a2e; --text: #eee; --border: #333; --primary: #00d9ff; --bg2: #16213e; --label: #aaa; }
+    
+    body { width: 500px; max-height: 580px; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); padding: 16px; margin: 0; box-sizing: border-box; overflow: hidden; display: flex; flex-direction: column; }
+    h2 { font-size: 15px; margin: 0 0 12px; color: var(--primary); }
+    .form-group { margin-bottom: 10px; }
+    label { display: block; font-size: 11px; color: var(--label); margin-bottom: 4px; }
+    select, input, textarea { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 12px; box-sizing: border-box; }
+    textarea { resize: vertical; }
+    select:focus, input:focus { outline: none; border-color: var(--primary); }
+    button { padding: 8px 16px; border: none; border-radius: 6px; background: var(--primary); color: #fff; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+    button:hover { opacity: 0.9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: var(--bg2); color: var(--text); border: 1px solid var(--border); }
+    
+    #result { margin-top: 12px; padding: 10px; background: var(--bg2); border-radius: 6px; font-size: 12px; flex: 1; overflow-y: auto; min-height: 0; }
+    .error { color: var(--error); }
+    .loading { color: var(--primary); }
+    .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 12px; flex-shrink: 0; }
+    .tab { flex: 1; padding: 8px; text-align: center; cursor: pointer; color: var(--label); font-size: 12px; display: flex; align-items: center; justify-content: center; gap: 6px; transition: color 0.15s; }
+    .tab.active { color: var(--primary); border-bottom: 2px solid var(--primary); }
+    .tab svg { width: 14px; height: 14px; stroke: currentColor; }
+    .tab-content { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+    .tab-content.active { display: flex; }
+    
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    .toggle-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; }
+    .toggle { width: 40px; height: 22px; background: var(--border); border-radius: 11px; position: relative; cursor: pointer; transition: background 0.2s; }
+    .toggle.active { background: var(--primary); }
+    .toggle::after { content: ''; position: absolute; width: 18px; height: 18px; background: #fff; border-radius: 50%; top: 2px; left: 2px; transition: left 0.2s; }
+    .toggle.active::after { left: 20px; }
+    
+    .result-cols { display: flex; gap: 12px; }
+    .result-col { flex: 1; }
+    .result-col h4 { font-size: 11px; color: var(--primary); margin: 0 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; display: flex; align-items: center; gap: 4px; }
+    .result-col h4 svg { width: 12px; height: 12px; stroke: currentColor; fill: none; }
+    .result-col.cn h4 { color: #f60; }
+    
+    .validation-msg { font-size: 11px; margin-top: 4px; }
+    .validation-msg.success { color: var(--success); }
+    .validation-msg.error { color: var(--error); }
+  </style>
+</head>
+<body>
+  <div class="tabs">
+    <div class="tab active" data-tab="summarize">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13H8"/><path d="M16 17H8"/><path d="M16 13h-2"/></svg>
+      Summarise
+    </div>
+    <div class="tab" data-tab="settings">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+      Settings
+    </div>
+  </div>
+  
+  <div id="summarizeTab" class="tab-content active">
+    <div class="form-group row">
+      <div>
+        <label>AI Provider</label>
+        <select id="provider">
+          <option value="gemini">Google Gemini</option>
+          <option value="minimax">MiniMax</option>
+          <option value="openai">OpenAI</option>
+        </select>
+      </div>
+      <div>
+        <label>Model</label>
+        <select id="model"></select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Prompt</label>
+      <textarea id="prompt" rows="3">Summarise this article in its original language. Output format: A brief summary paragraph, followed by a few key bullet points (3 - 5 items)</textarea>
+    </div>
+    <button id="summarizeBtn">Summarise Page</button>
+    <div id="result"></div>
+  </div>
+  
+  <div id="settingsTab" class="tab-content">
+    <div class="form-group">
+      <label>Select Provider to Configure</label>
+      <select id="configProvider">
+        <option value="gemini">Google Gemini</option>
+        <option value="minimax">MiniMax</option>
+        <option value="openai">OpenAI</option>
+      </select>
+    </div>
+    
+    <div class="form-group">
+      <label>Base URL</label>
+      <input type="text" id="baseUrl" placeholder="https://...">
+    </div>
+    
+    <div class="form-group">
+      <label>Model (comma-separated to add more)</label>
+      <input type="text" id="modelList" placeholder="e.g. gemini-2.5-flash, gemini-2.0-flash">
+    </div>
+    
+    <div class="form-group">
+      <label>API Key <span id="keyMask" style="color:var(--label);font-size:11px;"></span></label>
+      <input type="password" id="apiKey" placeholder="Enter API key">
+    </div>
+    
+    <div class="form-group">
+      <div id="apiValidation" class="validation-msg"></div>
+    </div>
+    
+    <div class="row">
+      <button id="saveBtn">Save &amp; Validate</button>
+      <button id="resetBtn" class="secondary">Reset to Default</button>
+    </div>
+    
+    <hr style="border:none;border-top:1px solid var(--border);margin:16px 0;">
+    
+    <div class="form-group">
+      <label>Theme</label>
+      <select id="theme">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </div>
+    
+    <div class="toggle-row">
+      <span>Enable Chinese Translation</span>
+      <div class="toggle" id="translationToggle"></div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
