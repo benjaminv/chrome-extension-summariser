@@ -77,6 +77,21 @@ function extractResponse(provider, json) {
   return json.choices?.[0]?.message?.content;
 }
 
+// Fetch with timeout (30 seconds)
+async function fetchWithTimeout(url, options, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...options, signal: controller.signal });
+    return resp;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Request timed out');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Main summarise handler
 async function handleSummarise({ provider, model, apiKey, baseUrl, prompt, translate, tabId }) {
   try {
@@ -92,14 +107,12 @@ async function handleSummarise({ provider, model, apiKey, baseUrl, prompt, trans
     if (!pageText || pageText.length < 50) throw new Error('No content found on page');
 
     // Step 2: Summarise
-    await chrome.storage.local.set({ summaryStatus: 'analysing' });
+    await chrome.storage.local.set({ summaryStatus: 'summarising' });
 
     const summarySystem = 'You are a professional summariser. Output ONLY the final result. Do NOT show any thinking, reasoning, or explanation. Do NOT include any meta-commentary. Just give the answer directly.';
 
-    await chrome.storage.local.set({ summaryStatus: 'summarising' });
-
     const summaryReq = buildRequest(provider, apiKey, baseUrl, model, summarySystem, prompt + '\n\n' + pageText, 800);
-    const summaryResp = await fetch(summaryReq.url, summaryReq.options);
+    const summaryResp = await fetchWithTimeout(summaryReq.url, summaryReq.options);
     if (!summaryResp.ok) throw new Error('API error: ' + summaryResp.status);
 
     const summaryJson = await summaryResp.json();
@@ -108,35 +121,47 @@ async function handleSummarise({ provider, model, apiKey, baseUrl, prompt, trans
 
     summary = stripThinkTags(summary);
 
-    // Save summary immediately
+    // Step 3: Check if translation needed
+    const needsTranslation = translate && !/[\u4e00-\u9fa5]/.test(summary.substring(0, 200));
+
+    // Save summary — only set 'translating' if actually going to translate
     await chrome.storage.local.set({
       currentSummary: summary,
       currentTranslation: '',
-      summaryStatus: translate ? 'translating' : 'done'
+      summaryStatus: needsTranslation ? 'translating' : 'done'
     });
 
-    // Step 3: Translate if enabled and not already Chinese
-    if (translate && !/[\u4e00-\u9fa5]/.test(summary.substring(0, 200))) {
+    // Step 4: Translate if needed
+    if (needsTranslation) {
       const translateSystem = 'You are a pure translator. Translate the following text to Chinese. Output ONLY the translated text. Do NOT re-analyse, re-summarise, or add any extra content. Do NOT reference any original article or source material. Just translate the exact text given to you word by word, preserving the original format and structure.';
       const translateContent = 'Translate the following text to Chinese. Do NOT add anything extra, just translate:\n\n' + summary;
 
-      const transReq = buildRequest(provider, apiKey, baseUrl, model, translateSystem, translateContent, 1000);
-      const transResp = await fetch(transReq.url, transReq.options);
+      try {
+        const transReq = buildRequest(provider, apiKey, baseUrl, model, translateSystem, translateContent, 1000);
+        const transResp = await fetchWithTimeout(transReq.url, transReq.options);
 
-      if (transResp.ok) {
-        const transJson = await transResp.json();
-        let translation = extractResponse(provider, transJson);
-        translation = stripThinkTags(translation);
+        if (transResp.ok) {
+          const transJson = await transResp.json();
+          let translation = extractResponse(provider, transJson);
+          translation = stripThinkTags(translation);
 
-        await chrome.storage.local.set({
-          currentTranslation: translation || '',
-          summaryStatus: 'done'
-        });
-      } else {
+          await chrome.storage.local.set({
+            currentTranslation: translation || '',
+            summaryStatus: 'done'
+          });
+        } else {
+          await chrome.storage.local.set({
+            currentTranslation: '',
+            summaryStatus: 'done',
+            summaryError: 'Translation failed: API error ' + transResp.status
+          });
+        }
+      } catch (transErr) {
+        // Translation timed out or failed — still mark as done with summary
         await chrome.storage.local.set({
           currentTranslation: '',
           summaryStatus: 'done',
-          summaryError: 'Translation failed: API error ' + transResp.status
+          summaryError: 'Translation failed: ' + transErr.message
         });
       }
     }
